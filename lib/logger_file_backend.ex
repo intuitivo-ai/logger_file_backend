@@ -70,7 +70,7 @@ defmodule LoggerFileBackend do
     :crypto.strong_rand_bytes(5) |> Base.url_encode64(padding: false)
   end
 
-  defp log_event(_level, _msg, _ts, _md, %{path: nil} = state) do
+  defp log_event(level, msg, ts, md, %{path: nil} = state) do
     
     output = format_event(level, msg, ts, md, state)
 
