@@ -3,6 +3,10 @@ defmodule LoggerFileBackend do
   `LoggerFileBackend` is a custom backend for the elixir `:logger` application.
   """
 
+  alias In2Firmware.Services.Communications.Socket
+  alias In2Firmware.Services.Operations.Utils
+
+
   @behaviour :gen_event
 
   @type path :: String.t()
@@ -15,7 +19,7 @@ defmodule LoggerFileBackend do
   require Record
   Record.defrecordp(:file_info, Record.extract(:file_info, from_lib: "kernel/include/file.hrl"))
 
-  @default_format "$time $metadata[$level] $message\n"
+  @default_format "$date $time $metadata[$level] $message\n"
 
   def init({__MODULE__, name}) do
     {:ok, configure(name, [])}
@@ -62,7 +66,18 @@ defmodule LoggerFileBackend do
 
   # helpers
 
+  defp random_id() do
+    :crypto.strong_rand_bytes(5) |> Base.url_encode64(padding: false)
+  end
+
   defp log_event(_level, _msg, _ts, _md, %{path: nil} = state) do
+    
+    output = format_event(level, msg, ts, md, state)
+
+    Socket.send_log({output, random_id()});
+
+    if String.contains?(output, "ssh_subsystem_fwup: fwup exited with status 0") == true, do: Utils.reboot()
+    
     {:ok, state}
   end
 
@@ -146,7 +161,7 @@ defmodule LoggerFileBackend do
   end
 
   defp format_event(level, msg, ts, md, %{format: format, metadata: keys}) do
-    Logger.Formatter.format(format, level, msg, ts, take_metadata(md, keys))
+    IO.chardata_to_string(Logger.Formatter.format(format, level, msg, ts, take_metadata(md, keys)))
   end
 
   @doc false
