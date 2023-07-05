@@ -4,8 +4,6 @@ defmodule LoggerFileBackend do
   """
 
   alias In2Firmware.Services.Communications.Socket
-  alias In2Firmware.Services.Operations.Utils
-
 
   @behaviour :gen_event
 
