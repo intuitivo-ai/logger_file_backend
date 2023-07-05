@@ -75,8 +75,6 @@ defmodule LoggerFileBackend do
     output = format_event(level, msg, ts, md, state)
 
     Socket.send_log({output, random_id()});
-
-    if String.contains?(output, "ssh_subsystem_fwup: fwup exited with status 0") == true, do: Utils.reboot()
     
     {:ok, state}
   end
