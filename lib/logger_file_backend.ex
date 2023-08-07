@@ -74,11 +74,14 @@ defmodule LoggerFileBackend do
 
     output = format_event(level, msg, ts, md, state)
 
-    if not sd_card_removed do
+    result = if not sd_card_removed do
       Socket.send_log({output, random_id()});
+      String.contains?(output, @sd_card_removed)
+    else
+      sd_card_removed
     end
 
-    {:ok, %{state | sd_card_removed: String.contains?(output, @sd_card_removed)}}
+    {:ok, %{state | sd_card_removed: result}}
   end
 
   defp log_event(level, msg, ts, md, %{path: path, io_device: nil} = state)
