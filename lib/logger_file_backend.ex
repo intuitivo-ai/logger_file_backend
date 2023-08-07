@@ -14,7 +14,7 @@ defmodule LoggerFileBackend do
   @type level :: Logger.level()
   @type metadata :: [atom]
 
-  @sd_card_removed "mmc0: card aaaa removed"
+  @sd_card_error "SQUASHFS error"
 
   require Record
   Record.defrecordp(:file_info, Record.extract(:file_info, from_lib: "kernel/include/file.hrl"))
@@ -70,18 +70,15 @@ defmodule LoggerFileBackend do
     :crypto.strong_rand_bytes(5) |> Base.url_encode64(padding: false)
   end
 
-  defp log_event(level, msg, ts, md, %{path: nil, sd_card_removed: sd_card_removed} = state) do
+  defp log_event(level, msg, ts, md, %{path: nil} = state) do
 
     output = format_event(level, msg, ts, md, state)
 
-    result = if not sd_card_removed do
+    if not String.contains?(output, @sd_card_error) do
       Socket.send_log({output, random_id()});
-      String.contains?(output, @sd_card_removed)
-    else
-      sd_card_removed
     end
 
-    {:ok, %{state | sd_card_removed: result}}
+    {:ok, state}
   end
 
   defp log_event(level, msg, ts, md, %{path: path, io_device: nil} = state)
@@ -227,8 +224,7 @@ defmodule LoggerFileBackend do
       metadata: nil,
       metadata_filter: nil,
       metadata_reject: nil,
-      rotate: nil,
-      sd_card_removed: false
+      rotate: nil
     }
 
     configure(name, opts, state)
