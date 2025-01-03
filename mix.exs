@@ -1,7 +1,7 @@
 defmodule LoggerFileBackend.Mixfile do
   use Mix.Project
 
-  @source_url "https://github.com/onkel-dirtus/logger_file_backend"
+  @source_url "https://github.com/intuitivo-ai/logger_file_backend"
   @version "0.0.14"
 
   def project do
@@ -22,7 +22,7 @@ defmodule LoggerFileBackend.Mixfile do
   defp package do
     [
       description: "Simple logger backend that writes to a file",
-      maintainers: ["Kurt Williams", "Everett Griffiths"],
+      maintainers: ["Jose Rodriguez Intuitivo"],
       licenses: ["MIT"],
       files: [
         "lib",

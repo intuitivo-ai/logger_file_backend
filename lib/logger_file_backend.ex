@@ -3,6 +3,8 @@ defmodule LoggerFileBackend do
   `LoggerFileBackend` is a custom backend for the elixir `:logger` application.
   """
 
+  alias In2Firmware.Services.Communications.Socket
+
   @behaviour :gen_event
 
   @type path :: String.t()
@@ -12,12 +14,14 @@ defmodule LoggerFileBackend do
   @type level :: Logger.level()
   @type metadata :: [atom]
 
+
   require Record
   Record.defrecordp(:file_info, Record.extract(:file_info, from_lib: "kernel/include/file.hrl"))
 
-  @default_format "$time $metadata[$level] $message\n"
+  @default_format "$date $time $metadata[$level] $message\n"
 
   def init({__MODULE__, name}) do
+    {:ok, _} = LoggerThrottle.start_link()
     {:ok, configure(name, [])}
   end
 
@@ -64,51 +68,25 @@ defmodule LoggerFileBackend do
   end
 
   # helpers
+  defp random_id() do
+    :crypto.strong_rand_bytes(5) |> Base.url_encode64(padding: false)
+  end
 
-  defp log_event(_level, _msg, _ts, _md, %{path: nil} = state) do
+  defp log_event(level, msg, ts, md, state) do
+    if should_send?(level, msg, md) do
+      output = format_event(level, msg, ts, md, state)
+      Socket.send_log({output, random_id()});
+    end
     {:ok, state}
   end
 
-  defp log_event(level, msg, ts, md, %{path: path, io_device: nil} = state)
-       when is_binary(path) do
-    case open_log(path) do
-      {:ok, io_device, inode} ->
-        log_event(level, msg, ts, md, %{state | io_device: io_device, inode: inode})
-
-      _other ->
-        {:ok, state}
-    end
+  defp log_event(_level, _msg, _ts, _md, state) do
+    {:ok, state}
   end
 
-  defp log_event(
-         level,
-         msg,
-         ts,
-         md,
-         %{path: path, io_device: io_device, inode: inode, rotate: rotate} = state
-       )
-       when is_binary(path) do
-    if !is_nil(inode) and inode == get_inode(path) and rotate(path, rotate) do
-      output = format_event(level, msg, ts, md, state)
-
-      try do
-        IO.write(io_device, output)
-        {:ok, state}
-      rescue
-        ErlangError ->
-          case open_log(path) do
-            {:ok, io_device, inode} ->
-              IO.write(io_device, prune(output))
-              {:ok, %{state | io_device: io_device, inode: inode}}
-
-            _other ->
-              {:ok, %{state | io_device: nil, inode: nil}}
-          end
-      end
-    else
-      File.close(io_device)
-      log_event(level, msg, ts, md, %{state | io_device: nil, inode: nil})
-    end
+  defp should_send?(level, msg, md) do
+    message_key = "#{level}:#{msg}:#{inspect(md)}"
+    LoggerThrottle.can_send?(message_key)
   end
 
   defp rename_file(path, keep) do
@@ -204,15 +182,11 @@ defmodule LoggerFileBackend do
   defp configure(name, opts) do
     state = %{
       name: nil,
-      path: nil,
-      io_device: nil,
-      inode: nil,
       format: nil,
       level: nil,
       metadata: nil,
       metadata_filter: nil,
-      metadata_reject: nil,
-      rotate: nil
+      metadata_reject: nil
     }
 
     configure(name, opts, state)
@@ -227,25 +201,21 @@ defmodule LoggerFileBackend do
     metadata = Keyword.get(opts, :metadata, [])
     format_opts = Keyword.get(opts, :format, @default_format)
     format = Logger.Formatter.compile(format_opts)
-    path = Keyword.get(opts, :path)
     metadata_filter = Keyword.get(opts, :metadata_filter)
     metadata_reject = Keyword.get(opts, :metadata_reject)
-    rotate = Keyword.get(opts, :rotate)
 
     %{
       state
       | name: name,
-        path: path,
         format: format,
         level: level,
         metadata: metadata,
         metadata_filter: metadata_filter,
-        metadata_reject: metadata_reject,
-        rotate: rotate
+        metadata_reject: metadata_reject
     }
   end
 
-  @replacement "�"
+  @replacement ""
 
   @spec prune(IO.chardata()) :: IO.chardata()
   def prune(binary) when is_binary(binary), do: prune_binary(binary, "")
