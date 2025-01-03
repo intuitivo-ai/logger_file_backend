@@ -3,8 +3,6 @@ defmodule LoggerFileBackend do
   `LoggerFileBackend` is a custom backend for the elixir `:logger` application.
   """
 
-  alias In2Firmware.Services.Communications.Socket
-
   @behaviour :gen_event
 
   @type path :: String.t()
@@ -14,12 +12,10 @@ defmodule LoggerFileBackend do
   @type level :: Logger.level()
   @type metadata :: [atom]
 
-  @sd_card_error "SQUASHFS error"
-
   require Record
   Record.defrecordp(:file_info, Record.extract(:file_info, from_lib: "kernel/include/file.hrl"))
 
-  @default_format "$date $time $metadata[$level] $message\n"
+  @default_format "$time $metadata[$level] $message\n"
 
   def init({__MODULE__, name}) do
     {:ok, configure(name, [])}
@@ -38,6 +34,9 @@ defmodule LoggerFileBackend do
         %{level: min_level, metadata_filter: metadata_filter, metadata_reject: metadata_reject} =
           state
       ) do
+    level = to_logger_level(level)
+    min_level = to_logger_level(min_level)
+
     if (is_nil(min_level) or Logger.compare_levels(level, min_level) != :lt) and
          metadata_matches?(md, metadata_filter) and
          (is_nil(metadata_reject) or !metadata_matches?(md, metadata_reject)) do
@@ -66,18 +65,7 @@ defmodule LoggerFileBackend do
 
   # helpers
 
-  defp random_id() do
-    :crypto.strong_rand_bytes(5) |> Base.url_encode64(padding: false)
-  end
-
-  defp log_event(level, msg, ts, md, %{path: nil} = state) do
-
-    output = format_event(level, msg, ts, md, state)
-
-    if not String.contains?(output, @sd_card_error) do
-      Socket.send_log({output, random_id()});
-    end
-
+  defp log_event(_level, _msg, _ts, _md, %{path: nil} = state) do
     {:ok, state}
   end
 
@@ -161,7 +149,7 @@ defmodule LoggerFileBackend do
   end
 
   defp format_event(level, msg, ts, md, %{format: format, metadata: keys}) do
-    IO.chardata_to_string(Logger.Formatter.format(format, level, msg, ts, take_metadata(md, keys)))
+    Logger.Formatter.format(format, level, msg, ts, take_metadata(md, keys))
   end
 
   @doc false
@@ -274,4 +262,12 @@ defmodule LoggerFileBackend do
 
   defp prune_binary(<<>>, acc),
     do: acc
+
+  defp to_logger_level(:warn) do
+    if Version.compare(System.version(), "1.11.0") != :lt,
+      do: :warning,
+      else: :warn
+  end
+
+  defp to_logger_level(level), do: level
 end
