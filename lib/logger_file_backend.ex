@@ -21,7 +21,14 @@ defmodule LoggerFileBackend do
   @default_format "$date $time $metadata[$level] $message\n"
 
   def init({__MODULE__, name}) do
-    {:ok, _} = LoggerThrottle.start_link()
+    case Process.whereis(LoggerThrottle) do
+      nil ->
+        {:ok, pid} = LoggerThrottle.start_link()
+        Process.link(pid)
+      pid when is_pid(pid) ->
+        Process.link(pid)
+    end
+
     {:ok, configure(name, [])}
   end
 
@@ -55,12 +62,12 @@ defmodule LoggerFileBackend do
     {:ok, state}
   end
 
-  def handle_info({:EXIT, _pid, _reason}, %{io_device: io_device} = state)
-      when not is_nil(io_device) do
-    case File.close(io_device) do
-      :ok -> {:ok, state}
-      {:error, reason} -> raise "failure while closing file for reason: #{reason}"
+  def handle_info({:EXIT, pid, reason}, state) do
+    if Process.whereis(LoggerThrottle) == nil do
+      {:ok, pid} = LoggerThrottle.start_link()
+      Process.link(pid)
     end
+    {:ok, state}
   end
 
   def handle_info(_, state) do
@@ -73,11 +80,26 @@ defmodule LoggerFileBackend do
   end
 
   defp log_event(level, msg, ts, md, state) do
-    if should_send?(level, msg, md) do
-      output = format_event(level, msg, ts, md, state)
-      Socket.send_log({output, random_id()});
+    try do
+      if should_send?(level, msg, md) do
+        output = format_event(level, msg, ts, md, state)
+        # Envío asíncrono para evitar bloqueos
+        Task.start(fn ->
+          try do
+            Socket.send_log({output, random_id()})
+          catch
+            kind, error ->
+              # Silenciamos errores del socket para evitar loops infinitos de logging
+              :ok
+          end
+        end)
+      end
+      {:ok, state}
+    catch
+      kind, error ->
+        # Si hay error, continuamos sin enviar el log
+        {:ok, state}
     end
-    {:ok, state}
   end
 
   defp log_event(_level, _msg, _ts, _md, state) do
@@ -85,8 +107,12 @@ defmodule LoggerFileBackend do
   end
 
   defp should_send?(level, msg, md) do
-    message_key = "#{level}:#{msg}:#{inspect(md)}"
-    LoggerThrottle.can_send?(message_key)
+    try do
+      message_key = "#{level}:#{msg}:#{inspect(md)}"
+      LoggerThrottle.can_send?(message_key)
+    catch
+      _kind, _error -> true  # Si hay error en el throttle, permitimos el mensaje
+    end
   end
 
   defp rename_file(path, keep) do
