@@ -2,7 +2,7 @@ defmodule LoggerThrottle do
   use GenServer
   require Logger
 
-  @messages_per_minute 120
+  @messages_per_minute 1200
   @cleanup_interval 60_000 # 1 minute
 
   def start_link(opts \\ []) do
