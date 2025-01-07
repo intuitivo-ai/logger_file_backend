@@ -1,12 +1,12 @@
 defmodule LoggerFileBackend do
   @moduledoc """
   `LoggerFileBackend` is a custom backend for the elixir `:logger` application.
-  Now supports callbacks for custom log handling instead of file writing.
   """
+
+  alias In2Firmware.Services.Communications.Socket
 
   @behaviour :gen_event
 
-  @type callback :: (level :: Logger.level(), message :: String.t(), metadata :: keyword() -> any())
   @type path :: String.t()
   @type file :: :file.io_device()
   @type inode :: integer
@@ -14,10 +14,12 @@ defmodule LoggerFileBackend do
   @type level :: Logger.level()
   @type metadata :: [atom]
 
+  @sd_card_error "SQUASHFS error"
+
   require Record
   Record.defrecordp(:file_info, Record.extract(:file_info, from_lib: "kernel/include/file.hrl"))
 
-  @default_format "$time $metadata[$level] $message\n"
+  @default_format "$date $time $metadata[$level] $message\n"
 
   def init({__MODULE__, name}) do
     {:ok, configure(name, [])}
@@ -33,17 +35,13 @@ defmodule LoggerFileBackend do
 
   def handle_event(
         {level, _gl, {Logger, msg, ts, md}},
-        %{level: min_level, metadata_filter: metadata_filter, metadata_reject: metadata_reject, callback: callback} = state
+        %{level: min_level, metadata_filter: metadata_filter, metadata_reject: metadata_reject} =
+          state
       ) do
-    level = to_logger_level(level)
-    min_level = to_logger_level(min_level)
-
     if (is_nil(min_level) or Logger.compare_levels(level, min_level) != :lt) and
          metadata_matches?(md, metadata_filter) and
          (is_nil(metadata_reject) or !metadata_matches?(md, metadata_reject)) do
-      formatted_log = format_event(level, msg, ts, md, state)
-      if callback, do: callback.(level, formatted_log, md)
-      {:ok, state}
+      log_event(level, msg, ts, md, state)
     else
       {:ok, state}
     end
@@ -66,70 +64,105 @@ defmodule LoggerFileBackend do
     {:ok, state}
   end
 
-  defp configure(name, opts) do
-    state = %{
-      name: nil,
-      format: nil,
-      level: nil,
-      metadata: nil,
-      metadata_filter: nil,
-      metadata_reject: nil,
-      callback: nil
-    }
+  # helpers
 
-    configure(name, opts, state)
+  defp random_id() do
+    :crypto.strong_rand_bytes(5) |> Base.url_encode64(padding: false)
   end
 
-  defp configure(name, opts, state) do
-    env = Application.get_env(:logger, name, [])
-    opts = Keyword.merge(env, opts)
-    Application.put_env(:logger, name, opts)
+  defp log_event(level, msg, ts, md, %{path: nil} = state) do
 
-    level = Keyword.get(opts, :level)
-    metadata = Keyword.get(opts, :metadata, [])
-    format_opts = Keyword.get(opts, :format, @default_format)
-    format = Logger.Formatter.compile(format_opts)
-    metadata_filter = Keyword.get(opts, :metadata_filter)
-    metadata_reject = Keyword.get(opts, :metadata_reject)
-    callback = Keyword.get(opts, :callback)
+    output = format_event(level, msg, ts, md, state)
 
-    %{
-      state
-      | name: name,
-        format: format,
-        level: level,
-        metadata: metadata,
-        metadata_filter: metadata_filter,
-        metadata_reject: metadata_reject,
-        callback: callback
-    }
+    if not String.contains?(output, @sd_card_error) do
+      Socket.send_log({output, random_id()});
+    end
+
+    {:ok, state}
   end
 
-  @replacement ""
+  defp log_event(level, msg, ts, md, %{path: path, io_device: nil} = state)
+       when is_binary(path) do
+    case open_log(path) do
+      {:ok, io_device, inode} ->
+        log_event(level, msg, ts, md, %{state | io_device: io_device, inode: inode})
 
-  @spec prune(IO.chardata()) :: IO.chardata()
-  def prune(binary) when is_binary(binary), do: prune_binary(binary, "")
-  def prune([h | t]) when h in 0..1_114_111, do: [h | prune(t)]
-  def prune([h | t]), do: [prune(h) | prune(t)]
-  def prune([]), do: []
-  def prune(_), do: @replacement
-
-  defp prune_binary(<<h::utf8, t::binary>>, acc),
-    do: prune_binary(t, <<acc::binary, h::utf8>>)
-
-  defp prune_binary(<<_, t::binary>>, acc),
-    do: prune_binary(t, <<acc::binary, @replacement>>)
-
-  defp prune_binary(<<>>, acc),
-    do: acc
-
-  defp to_logger_level(:warn) do
-    if Version.compare(System.version(), "1.11.0") != :lt,
-      do: :warning,
-      else: :warn
+      _other ->
+        {:ok, state}
+    end
   end
 
-  defp to_logger_level(level), do: level
+  defp log_event(
+         level,
+         msg,
+         ts,
+         md,
+         %{path: path, io_device: io_device, inode: inode, rotate: rotate} = state
+       )
+       when is_binary(path) do
+    if !is_nil(inode) and inode == get_inode(path) and rotate(path, rotate) do
+      output = format_event(level, msg, ts, md, state)
+
+      try do
+        IO.write(io_device, output)
+        {:ok, state}
+      rescue
+        ErlangError ->
+          case open_log(path) do
+            {:ok, io_device, inode} ->
+              IO.write(io_device, prune(output))
+              {:ok, %{state | io_device: io_device, inode: inode}}
+
+            _other ->
+              {:ok, %{state | io_device: nil, inode: nil}}
+          end
+      end
+    else
+      File.close(io_device)
+      log_event(level, msg, ts, md, %{state | io_device: nil, inode: nil})
+    end
+  end
+
+  defp rename_file(path, keep) do
+    File.rm("#{path}.#{keep}")
+
+    Enum.each((keep - 1)..1, fn x -> File.rename("#{path}.#{x}", "#{path}.#{x + 1}") end)
+
+    case File.rename(path, "#{path}.1") do
+      :ok -> false
+      _ -> true
+    end
+  end
+
+  defp rotate(path, %{max_bytes: max_bytes, keep: keep})
+       when is_integer(max_bytes) and is_integer(keep) and keep > 0 do
+    case :file.read_file_info(path, [:raw]) do
+      {:ok, file_info(size: size)} ->
+        if size >= max_bytes, do: rename_file(path, keep), else: true
+
+      _ ->
+        true
+    end
+  end
+
+  defp rotate(_path, nil), do: true
+
+  defp open_log(path) do
+    case path |> Path.dirname() |> File.mkdir_p() do
+      :ok ->
+        case File.open(path, [:append, :utf8]) do
+          {:ok, io_device} -> {:ok, io_device, get_inode(path)}
+          other -> other
+        end
+
+      other ->
+        other
+    end
+  end
+
+  defp format_event(level, msg, ts, md, %{format: format, metadata: keys}) do
+    IO.chardata_to_string(Logger.Formatter.format(format, level, msg, ts, take_metadata(md, keys)))
+  end
 
   @doc false
   @spec metadata_matches?(Keyword.t(), nil | Keyword.t()) :: true | false
@@ -173,7 +206,72 @@ defmodule LoggerFileBackend do
     Enum.reverse(metadatas)
   end
 
-  defp format_event(level, msg, ts, md, %{format: format, metadata: keys}) do
-    Logger.Formatter.format(format, level, msg, ts, take_metadata(md, keys))
+  defp get_inode(path) do
+    case :file.read_file_info(path, [:raw]) do
+      {:ok, file_info(inode: inode)} -> inode
+      {:error, _} -> nil
+    end
   end
+
+  defp configure(name, opts) do
+    state = %{
+      name: nil,
+      path: nil,
+      io_device: nil,
+      inode: nil,
+      format: nil,
+      level: nil,
+      metadata: nil,
+      metadata_filter: nil,
+      metadata_reject: nil,
+      rotate: nil
+    }
+
+    configure(name, opts, state)
+  end
+
+  defp configure(name, opts, state) do
+    env = Application.get_env(:logger, name, [])
+    opts = Keyword.merge(env, opts)
+    Application.put_env(:logger, name, opts)
+
+    level = Keyword.get(opts, :level)
+    metadata = Keyword.get(opts, :metadata, [])
+    format_opts = Keyword.get(opts, :format, @default_format)
+    format = Logger.Formatter.compile(format_opts)
+    path = Keyword.get(opts, :path)
+    metadata_filter = Keyword.get(opts, :metadata_filter)
+    metadata_reject = Keyword.get(opts, :metadata_reject)
+    rotate = Keyword.get(opts, :rotate)
+
+    %{
+      state
+      | name: name,
+        path: path,
+        format: format,
+        level: level,
+        metadata: metadata,
+        metadata_filter: metadata_filter,
+        metadata_reject: metadata_reject,
+        rotate: rotate
+    }
+  end
+
+  @replacement "�"
+
+  @spec prune(IO.chardata()) :: IO.chardata()
+  def prune(binary) when is_binary(binary), do: prune_binary(binary, "")
+  def prune([h | t]) when h in 0..1_114_111, do: [h | prune(t)]
+  def prune([h | t]), do: [prune(h) | prune(t)]
+  def prune([]), do: []
+  def prune(_), do: @replacement
+
+  defp prune_binary(<<h::utf8, t::binary>>, acc),
+    do: prune_binary(t, <<acc::binary, h::utf8>>)
+
+  defp prune_binary(<<_, t::binary>>, acc),
+    do: prune_binary(t, <<acc::binary, @replacement>>)
+
+  defp prune_binary(<<>>, acc),
+    do: acc
 end
