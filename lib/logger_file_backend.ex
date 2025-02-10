@@ -22,7 +22,8 @@ defmodule LoggerFileBackend do
   @default_format "$date $time $metadata[$level] $message\n"
 
   def init({__MODULE__, name}) do
-    {:ok, configure(name, [])}
+    state = configure(name, [])
+    {:ok, Map.put(state, :buffer_logs, [])}
   end
 
   def handle_call({:configure, opts}, %{name: name} = state) do
@@ -70,15 +71,27 @@ defmodule LoggerFileBackend do
     :crypto.strong_rand_bytes(5) |> Base.url_encode64(padding: false)
   end
 
-  defp log_event(level, msg, ts, md, %{path: nil} = state) do
-
+  defp log_event(level, msg, ts, md, %{path: nil, buffer_logs: buffer_logs} = state) do
     output = format_event(level, msg, ts, md, state)
 
     if not String.contains?(output, @sd_card_error) do
-      Socket.send_log({output, random_id()});
-    end
+      new_buffer = [output | buffer_logs]
 
-    {:ok, state}
+      if length(new_buffer) >= 20 do
+        # Concatenamos todos los logs en un solo string
+        combined_output = new_buffer
+          |> Enum.reverse()
+          |> Enum.join("\n")
+
+        # Enviamos el string combinado con un solo ID
+        Socket.send_log({combined_output, random_id()})
+        {:ok, %{state | buffer_logs: []}}
+      else
+        {:ok, %{state | buffer_logs: new_buffer}}
+      end
+    else
+      {:ok, state}
+    end
   end
 
   defp log_event(level, msg, ts, md, %{path: path, io_device: nil} = state)
@@ -224,7 +237,8 @@ defmodule LoggerFileBackend do
       metadata: nil,
       metadata_filter: nil,
       metadata_reject: nil,
-      rotate: nil
+      rotate: nil,
+      buffer_logs: []
     }
 
     configure(name, opts, state)
