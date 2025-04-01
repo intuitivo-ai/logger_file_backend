@@ -21,10 +21,6 @@ defmodule LoggerFileBackend do
 
   @default_format "$date $time $metadata[$level] $message\n"
 
-  def set_verbose(verbose) do
-    GenServer.cast(__MODULE__, {:set_verbose, verbose})
-  end
-
   def init({__MODULE__, name}) do
     state = configure(name, [])
     # Read verbose setting from file, default to false if file doesn't exist
@@ -39,11 +35,11 @@ defmodule LoggerFileBackend do
       |> Map.put(:verbose, verbose)}
   end
 
-  def handle_cast({:set_verbose, verbose}, state) do
+  def handle_call({:configure, opts = [verbose: verbose]}, %{name: name} = state) do
     # Save verbose state to file
     File.write("/root/verbose.txt", "#{verbose}")
 
-    {:noreply, state |> Map.put(:verbose, verbose)}
+    {:ok, :ok, state |> Map.put(:verbose, verbose)}
   end
 
   def handle_call({:configure, opts}, %{name: name} = state) do
