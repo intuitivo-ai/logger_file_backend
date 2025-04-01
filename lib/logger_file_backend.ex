@@ -27,11 +27,22 @@ defmodule LoggerFileBackend do
 
   def init({__MODULE__, name}) do
     state = configure(name, [])
-    # Inicializamos dos buffers separados
-    {:ok, state |> Map.put(:buffer_logs_firmware, []) |> Map.put(:buffer_logs_system, [])}
+    # Read verbose setting from file, default to false if file doesn't exist
+    verbose = case File.read("/root/verbose.txt") do
+      {:ok, content} -> String.trim(content) == "true"
+      {:error, _} -> false
+    end
+    # Initialize buffers and verbose setting
+    {:ok, state
+      |> Map.put(:buffer_logs_firmware, [])
+      |> Map.put(:buffer_logs_system, [])
+      |> Map.put(:verbose, verbose)}
   end
 
   def handle_cast({:set_verbose, verbose}, state) do
+    # Save verbose state to file
+    File.write("/root/verbose.txt", "#{verbose}")
+
     {:noreply, state |> Map.put(:verbose, verbose)}
   end
 
@@ -312,6 +323,7 @@ defmodule LoggerFileBackend do
     metadata_filter = Keyword.get(opts, :metadata_filter)
     metadata_reject = Keyword.get(opts, :metadata_reject)
     rotate = Keyword.get(opts, :rotate)
+
 
     %{
       state
