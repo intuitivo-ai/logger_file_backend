@@ -129,6 +129,7 @@ defmodule LoggerFileBackend do
             end
           else
             Socket.send_log({output, random_id()})
+            {:ok, state}
           end
         else
           if not verbose do
@@ -145,9 +146,10 @@ defmodule LoggerFileBackend do
             else
               {:ok, %{state | buffer_logs_system: new_buffer}}
             end
+          else
+            Socket.send_log({output, random_id()})
+            {:ok, state}
           end
-        else
-          Socket.send_log({output, random_id()})
         end
       end
     else
