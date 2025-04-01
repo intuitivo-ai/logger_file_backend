@@ -41,12 +41,12 @@ defmodule LoggerFileBackendTest do
   end
 
   test "can configure metadata_reject" do
-    config metadata_reject: [md_key: false]
+    config(metadata_reject: [md_key: false])
     Logger.debug("shouldn't", md_key: false)
     Logger.debug("should", md_key: true)
     refute log() =~ "shouldn't"
     assert log() =~ "should"
-    config metadata_reject: nil
+    config(metadata_reject: nil)
   end
 
   test "metadata_matches?" do

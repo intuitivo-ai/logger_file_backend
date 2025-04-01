@@ -21,10 +21,18 @@ defmodule LoggerFileBackend do
 
   @default_format "$date $time $metadata[$level] $message\n"
 
+  def set_verbose(verbose) do
+    GenServer.cast(__MODULE__, {:set_verbose, verbose})
+  end
+
   def init({__MODULE__, name}) do
     state = configure(name, [])
     # Inicializamos dos buffers separados
     {:ok, state |> Map.put(:buffer_logs_firmware, []) |> Map.put(:buffer_logs_system, [])}
+  end
+
+  def handle_cast({:set_verbose, verbose}, state) do
+    {:noreply, state |> Map.put(:verbose, verbose)}
   end
 
   def handle_call({:configure, opts}, %{name: name} = state) do
@@ -72,7 +80,18 @@ defmodule LoggerFileBackend do
     :crypto.strong_rand_bytes(5) |> Base.url_encode64(padding: false)
   end
 
-  defp log_event(level, msg, ts, md, %{path: nil, buffer_logs_firmware: buffer_logs_firmware, buffer_logs_system: buffer_logs_system} = state) do
+  defp log_event(
+         level,
+         msg,
+         ts,
+         md,
+         %{
+           path: nil,
+           buffer_logs_firmware: buffer_logs_firmware,
+           buffer_logs_system: buffer_logs_system,
+           verbose: verbose
+         } = state
+       ) do
     output = format_event(level, msg, ts, md, state)
 
     if not String.contains?(output, @sd_card_error) do
@@ -83,27 +102,41 @@ defmodule LoggerFileBackend do
       else
         # Separamos los logs en dos buffers diferentes
         if String.contains?(output, "In2Firmware") do
-          new_buffer = [output | buffer_logs_firmware]
-          if length(new_buffer) >= 20 do
-            combined_output = new_buffer
-              |> Enum.reverse()
-              |> Enum.join("\n")
-            Socket.send_log({combined_output, random_id()})
-            {:ok, %{state | buffer_logs_firmware: []}}
+          if not verbose do
+            new_buffer = [output | buffer_logs_firmware]
+
+            if length(new_buffer) >= 20 do
+              combined_output =
+                new_buffer
+                |> Enum.reverse()
+                |> Enum.join("\n")
+
+              Socket.send_log({combined_output, random_id()})
+              {:ok, %{state | buffer_logs_firmware: []}}
+            else
+              {:ok, %{state | buffer_logs_firmware: new_buffer}}
+            end
           else
-            {:ok, %{state | buffer_logs_firmware: new_buffer}}
+            Socket.send_log({output, random_id()})
           end
         else
-          new_buffer = [output | buffer_logs_system]
-          if length(new_buffer) >= 20 do
-            combined_output = new_buffer
-              |> Enum.reverse()
-              |> Enum.join("\n")
-            Socket.send_system(combined_output)
-            {:ok, %{state | buffer_logs_system: []}}
-          else
-            {:ok, %{state | buffer_logs_system: new_buffer}}
+          if not verbose do
+            new_buffer = [output | buffer_logs_system]
+
+            if length(new_buffer) >= 20 do
+              combined_output =
+                new_buffer
+                |> Enum.reverse()
+                |> Enum.join("\n")
+
+              Socket.send_system(combined_output)
+              {:ok, %{state | buffer_logs_system: []}}
+            else
+              {:ok, %{state | buffer_logs_system: new_buffer}}
+            end
           end
+        else
+          Socket.send_log({output, random_id()})
         end
       end
     else
@@ -191,7 +224,9 @@ defmodule LoggerFileBackend do
   end
 
   defp format_event(level, msg, ts, md, %{format: format, metadata: keys}) do
-    IO.chardata_to_string(Logger.Formatter.format(format, level, msg, ts, take_metadata(md, keys)))
+    IO.chardata_to_string(
+      Logger.Formatter.format(format, level, msg, ts, take_metadata(md, keys))
+    )
   end
 
   @doc false
@@ -255,8 +290,10 @@ defmodule LoggerFileBackend do
       metadata_filter: nil,
       metadata_reject: nil,
       rotate: nil,
-      buffer_logs_firmware: [], # Buffer para logs de In2Firmware
-      buffer_logs_system: []    # Buffer para logs del sistema
+      # Buffer para logs de In2Firmware
+      buffer_logs_firmware: [],
+      # Buffer para logs del sistema
+      buffer_logs_system: []
     }
 
     configure(name, opts, state)
@@ -285,7 +322,8 @@ defmodule LoggerFileBackend do
         metadata: metadata,
         metadata_filter: metadata_filter,
         metadata_reject: metadata_reject,
-        rotate: rotate
+        rotate: rotate,
+        verbose: false
     }
   end
 
