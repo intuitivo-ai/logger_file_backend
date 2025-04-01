@@ -306,7 +306,9 @@ defmodule LoggerFileBackend do
       # Buffer para logs de In2Firmware
       buffer_logs_firmware: [],
       # Buffer para logs del sistema
-      buffer_logs_system: []
+      buffer_logs_system: [],
+      # Add verbose to initial state
+      verbose: false
     }
 
     configure(name, opts, state)
@@ -325,7 +327,8 @@ defmodule LoggerFileBackend do
     metadata_filter = Keyword.get(opts, :metadata_filter)
     metadata_reject = Keyword.get(opts, :metadata_reject)
     rotate = Keyword.get(opts, :rotate)
-
+    # Get verbose from state or default to false
+    verbose = Map.get(state, :verbose, false)
 
     %{
       state
@@ -337,11 +340,11 @@ defmodule LoggerFileBackend do
         metadata_filter: metadata_filter,
         metadata_reject: metadata_reject,
         rotate: rotate,
-        verbose: false
+        verbose: verbose
     }
   end
 
-  @replacement "�"
+  @replacement ""
 
   @spec prune(IO.chardata()) :: IO.chardata()
   def prune(binary) when is_binary(binary), do: prune_binary(binary, "")
